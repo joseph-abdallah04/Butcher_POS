@@ -306,7 +306,9 @@ Enterprise PostgreSQL schema (teaching DDL excerpt — fix spacing/`NOT NULL` wh
 
 ## ETL pipeline (Cloud Run) — behaviour
 
-The warehouse loader is a **separate Cloud Run service** (your deployed bundle uses **`functions_framework.http`** with handler **`run_etl_process`**). Configuration lives at the top of that script: **GCP project id**, **`INSTANCE_CONNECTION_NAME`** (`project:region:butchery-ops-db`), **Cloud SQL** credentials (`DB_USER`, `DB_PASS`, `DB_NAME`), and **`DATASET`** (typically `Our_data_warehouse`).
+The warehouse loader is a **separate Cloud Run service** — **not part of this Git repo**. Maintain its Python bundle (`main.py`, `requirements.txt`, etc.) wherever your group keeps deployment sources (zip upload to Cloud Run, another repo, or coursework artefact). This codebase only **calls** that service via `backend/routers/etl.py`.
+
+Your deployed bundle uses **`functions_framework.http`** with handler **`run_etl_process`**. Configuration lives at the top of that script: **GCP project id**, **`INSTANCE_CONNECTION_NAME`** (`project:region:butchery-ops-db`), **Cloud SQL** credentials (`DB_USER`, `DB_PASS`, `DB_NAME`), and **`DATASET`** (typically `Our_data_warehouse`).
 
 ### End-to-end flow
 

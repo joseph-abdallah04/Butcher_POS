@@ -78,6 +78,7 @@ def kpis(
             COALESCE(SUM(net_revenue), 0)      AS net_revenue,
             COALESCE(SUM(net_profit), 0)       AS net_profit,
             COALESCE(SUM(total_cogs), 0)       AS total_cogs,
+            COALESCE(SUM(tax_amount), 0)       AS total_tax,
             COUNT(DISTINCT sale_id)            AS transactions,
             SAFE_DIVIDE(SUM(net_revenue), COUNT(DISTINCT sale_id)) AS avg_basket
         FROM {fq('fact_sales_performance')} s
@@ -163,6 +164,7 @@ def top_products(
             f.product_id,
             p.product_name,
             p.category,
+            COALESCE(NULLIF(TRIM(p.unit_measure), ''), '—') AS unit_measure,
             SUM(f.quantity)        AS units_sold,
             SUM(f.net_revenue)     AS net_revenue,
             SUM(f.net_profit)      AS net_profit
@@ -170,7 +172,8 @@ def top_products(
         LEFT JOIN {fq('dim_products')} p USING (product_id)
         WHERE DATE(f.sale_timestamp) BETWEEN @start AND @end
         {ff}
-        GROUP BY f.product_id, p.product_name, p.category
+        GROUP BY f.product_id, p.product_name, p.category,
+            COALESCE(NULLIF(TRIM(p.unit_measure), ''), '—')
         ORDER BY net_profit DESC
         LIMIT @limit
     """
@@ -229,6 +232,7 @@ def wastage_summary(
             w.product_id,
             p.product_name,
             p.category,
+            COALESCE(NULLIF(TRIM(p.unit_measure), ''), '—') AS unit_measure,
             SUM(w.total_loss_value) AS total_loss_value,
             SUM(w.quantity_wasted)  AS quantity_wasted,
             COUNT(*)                AS events
@@ -236,7 +240,8 @@ def wastage_summary(
         LEFT JOIN {fq('dim_products')} p USING (product_id)
         WHERE DATE(w.event_timestamp) BETWEEN @start AND @end
         {wf}
-        GROUP BY w.product_id, p.product_name, p.category
+        GROUP BY w.product_id, p.product_name, p.category,
+            COALESCE(NULLIF(TRIM(p.unit_measure), ''), '—')
         ORDER BY total_loss_value DESC
         LIMIT 10
     """

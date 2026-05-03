@@ -248,6 +248,20 @@ export default function Reports() {
               <Bar dataKey="net_profit" fill={PALETTE[4]} name="Net profit" />
             </BarChart>
           </ResponsiveContainer>
+          <div className="mt-4">
+            <h3 className="mb-2 text-sm font-semibold text-slate-700">Detail (units from warehouse)</h3>
+            <Table
+              columns={[
+                { key: 'product_name', label: 'Product' },
+                { key: 'category', label: 'Category' },
+                { key: 'unit_measure', label: 'Unit' },
+                { key: 'units_sold', label: 'Qty sold', format: fmtNumber },
+                { key: 'net_revenue', label: 'Net revenue', format: fmtCurrency },
+                { key: 'net_profit', label: 'Net profit', format: fmtCurrency },
+              ]}
+              rows={data.topProducts}
+            />
+          </div>
         </Card>
 
         <Card title="Sales mix by category">
@@ -294,7 +308,13 @@ export default function Reports() {
               columns={[
                 { key: 'product_name', label: 'Product' },
                 { key: 'category', label: 'Category' },
-                { key: 'quantity_wasted', label: 'Qty', format: fmtNumber },
+                { key: 'unit_measure', label: 'Unit' },
+                {
+                  key: 'quantity_wasted',
+                  label: 'Qty wasted',
+                  format: (v, row) =>
+                    `${fmtNumber(v)}${row?.unit_measure && row.unit_measure !== '—' ? ` ${row.unit_measure}` : ''}`,
+                },
                 { key: 'events', label: 'Events', format: fmtNumber },
                 { key: 'total_loss_value', label: 'Loss value', format: fmtCurrency },
               ]}
@@ -433,6 +453,7 @@ function KpiGrid({ kpis }) {
     { label: 'Gross revenue', value: fmtCurrency(kpis.gross_revenue), accent: 'bg-slate-50 text-slate-700' },
     { label: 'Net profit', value: fmtCurrency(kpis.net_profit), accent: 'bg-green-50 text-green-700' },
     { label: 'COGS', value: fmtCurrency(kpis.total_cogs), accent: 'bg-amber-50 text-amber-700' },
+    { label: 'Tax paid', value: fmtCurrency(kpis.total_tax ?? 0), accent: 'bg-cyan-50 text-cyan-800' },
     { label: 'Transactions', value: fmtNumber(kpis.transactions), accent: 'bg-purple-50 text-purple-700' },
     { label: 'Avg basket', value: fmtCurrency(kpis.avg_basket), accent: 'bg-pink-50 text-pink-700' },
     { label: 'Total loss (wastage)', value: fmtCurrency(kpis.total_loss_value), accent: 'bg-red-50 text-red-700' },
@@ -480,7 +501,7 @@ function Table({ columns, rows }) {
             <tr key={i} className="hover:bg-slate-50">
               {columns.map((c) => (
                 <td key={c.key} className="px-3 py-2">
-                  {c.format ? c.format(row[c.key]) : String(row[c.key] ?? '')}
+                  {c.format ? c.format(row[c.key], row) : String(row[c.key] ?? '')}
                 </td>
               ))}
             </tr>

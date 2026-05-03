@@ -33,30 +33,33 @@ export default function Wastage() {
 
   const reload = useCallback(() => {
     if (!shop?.id) return;
-    Promise.all([
+    Promise.allSettled([
       api.get('/wastage', { shop_id: shop.id, limit: 20 }),
       api.get('/inventory', { shop_id: shop.id }),
-    ])
-      .then(([w, inv]) => {
-        setRecent(w);
-        setInventory(inv);
-      })
-      .catch(() => {});
+    ]).then(([wRes, invRes]) => {
+      if (wRes.status === 'fulfilled') setRecent(wRes.value);
+      if (invRes.status === 'fulfilled') setInventory(invRes.value);
+    });
   }, [shop?.id]);
 
   useEffect(() => {
     if (!shop?.id) return;
-    Promise.all([
+    Promise.allSettled([
       api.get('/products'),
       api.get('/inventory', { shop_id: shop.id }),
       api.get('/wastage', { shop_id: shop.id, limit: 20 }),
-    ])
-      .then(([p, inv, w]) => {
-        setProducts(p);
-        setInventory(inv);
-        setRecent(w);
-      })
-      .catch((err) => toast.error(err.message));
+    ]).then(([pRes, invRes, wRes]) => {
+      const failed = [];
+      if (pRes.status === 'fulfilled') setProducts(pRes.value);
+      else failed.push(`products (${pRes.reason?.message || 'error'})`);
+      if (invRes.status === 'fulfilled') setInventory(invRes.value);
+      else failed.push(`inventory (${invRes.reason?.message || 'error'})`);
+      if (wRes.status === 'fulfilled') setRecent(wRes.value);
+      else failed.push(`wastage (${wRes.reason?.message || 'error'})`);
+      if (failed.length) {
+        toast.error(`Request failed: ${failed.join('; ')}`);
+      }
+    });
   }, [shop?.id]);
 
   const submit = async (e) => {
