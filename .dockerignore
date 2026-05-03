@@ -1,0 +1,15 @@
+**/node_modules
+**/__pycache__
+**/.venv
+**/.env
+**/.env.*
+!**/.env.example
+**/.DS_Store
+**/dist
+.git
+.gitignore
+.cursor
+.idea
+.vscode
+*.md
+!README.md

@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+
+# Node
+node_modules/
+dist/
+
+# Env (never commit secrets — use .env.example only)
+.env
+.env.*
+!.env.example
+**/.env
+backend/.env
+frontend/.env
+frontend/.env.local
+
+# OS
+.DS_Store
+
+# Editors
+.idea/
+.vscode/
