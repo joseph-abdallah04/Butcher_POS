@@ -393,12 +393,3 @@ Typical endpoints: `kpis`, `revenue-trend`, `sales-velocity`, `top-products`, `c
 | UI §5.3 | Screenshots + FR/UI IDs |
 | Code / DW implementation | Honest description + GitHub + GCP locations |
 | Testing §7 | Procedure + FR-linked cases + results |
-
----
-
-## Maintenance
-
-- Keep **secrets out of git**: use `.env` locally and Cloud Run **secrets/env vars** in production.
-- After schema changes, update **ORM** (`backend/models.py`), **ETL script**, and **BigQuery DDL** together, then refresh this README’s tables.
-
-**Placeholder**: Replace generic URLs and project ids in student-written sections with your group’s real Cloud Run URL, GitHub repo, and (non-secret) resource names.
