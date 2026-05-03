@@ -308,8 +308,6 @@ Enterprise PostgreSQL schema (teaching DDL excerpt — fix spacing/`NOT NULL` wh
 
 The warehouse loader is a **separate Cloud Run service** (your deployed bundle uses **`functions_framework.http`** with handler **`run_etl_process`**). Configuration lives at the top of that script: **GCP project id**, **`INSTANCE_CONNECTION_NAME`** (`project:region:butchery-ops-db`), **Cloud SQL** credentials (`DB_USER`, `DB_PASS`, `DB_NAME`), and **`DATASET`** (typically `Our_data_warehouse`).
 
-**Do not commit database passwords** in source control or paste them into the assignment PDF — use **Secret Manager** or Cloud Run **secrets-as-environment-variables**. Rotate any credential that has appeared in chat or an old revision.
-
 ### End-to-end flow
 
 1. **Connect**: Cloud SQL Python Connector + SQLAlchemy `create_engine("postgresql+pg8000://", creator=getconn)`.
