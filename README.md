@@ -1,190 +1,406 @@
-# Butchery POS
+# Butchery POS — Technical Documentation & Assignment 2 Report Companion
 
-A point-of-sale web app for a butchery business. Staff lock to a shop, ring up
-sales and log wastage into a Google Cloud SQL (Postgres) operating database,
-trigger a Cloud Run ETL pipeline that loads the data warehouse, and view
-real-time business insights pulled live from BigQuery.
+This repository is a **franchise-aware point-of-sale and reporting system** for a butchery chain: operational data lives in **Google Cloud SQL (PostgreSQL)**; analytics run in **Google BigQuery** after an **ETL job on Cloud Run** loads or refreshes warehouse tables. The **Butchery POS** web app (React + FastAPI) records sales, wastage, inventory movements, and master data, triggers ETL from the Reports screen, and renders dashboards from BigQuery.
 
-- **Backend** - FastAPI, SQLAlchemy, `cloud-sql-python-connector[pg8000]`, `google-cloud-bigquery`
-- **Frontend** - React 18 + Vite + Tailwind + Recharts
-- **Operating DB** - Cloud SQL for Postgres (existing star schema source)
-- **Data warehouse** - BigQuery (`Our_data_warehouse` dataset, 5 dimension tables + 3 fact tables)
-- **Deploy target** - one Cloud Run service that serves both the API and the React bundle
+Use **Part A** for setup and deployment. Use **Part B** when writing **41091 Data Systems — Assignment 2** so diagrams, narratives, and tests align with the marking criteria and match what this codebase actually does.
 
-## Project structure
+---
+
+## Table of contents
+
+1. [Part A — Project overview & developer setup](#part-a--project-overview--developer-setup)
+2. [Part B — Assignment 2 report companion](#part-b--assignment-2-report-companion)
+3. [Operational database (OLTP) schema summary](#operational-database-oltp-schema-summary)
+4. [ETL pipeline (Cloud Run) — behaviour](#etl-pipeline-cloud-run--behaviour)
+5. [Data warehouse (BigQuery) schema summary](#data-warehouse-bigquery-schema-summary)
+6. [Application backend & frontend map](#application-backend--frontend-map)
+7. [Marking sheet alignment (quick reference)](#marking-sheet-alignment-quick-reference)
+
+---
+
+## Part A — Project overview & developer setup
+
+### Stack
+
+| Layer | Technology |
+| --- | --- |
+| Frontend | React 18, Vite, Tailwind CSS, Recharts |
+| Backend API | FastAPI, Pydantic v2, SQLAlchemy, `cloud-sql-python-connector[pg8000]` |
+| Analytics queries | `google-cloud-bigquery` |
+| OLTP | Cloud SQL for PostgreSQL |
+| Warehouse | BigQuery dataset (e.g. `Our_data_warehouse`) |
+| ETL | Separate Cloud Run service: Python, `pandas`, SQLAlchemy + Connector, BigQuery client (`functions_framework.http` entrypoint) |
+| Deployment | Single Cloud Run service (Dockerfile): serves `/api/*` and static SPA from `frontend/dist` |
+
+### Repository layout
 
 ```
 Butcher_POS/
-  Dockerfile                  multi-stage: build React, then Python runtime
+  Dockerfile                 # Multi-stage: npm build → Python image + SPA static files
   backend/
-    main.py                   FastAPI app, mounts /api and the SPA
-    database.py               Cloud SQL Connector + SQLAlchemy engine
-    bigquery_client.py        Lazily-initialised BigQuery client
-    models.py                 ORM models matching the existing OLTP schema
-    schemas.py                Pydantic v2 request/response models (with enums)
-    routers/                  shops, staff, categories, suppliers, customers,
-                              promotions, products, sales, wastage, etl, reports
+    main.py                  # FastAPI app, CORS, routers under /api, StaticFiles for SPA
+    database.py              # Cloud SQL Connector + SQLAlchemy engine + SessionLocal
+    models.py                # ORM aligned with OLTP tables (shops, products, sales, …)
+    schemas.py               # Request/response validation (enums for payment, wastage reason)
+    inventory_stock.py       # Stock deltas, non-negative enforcement, InsufficientStock
+    bigquery_client.py       # Lazy BigQuery client for Reports router
+    routers/                 # shops, staff, categories, suppliers, customers, promotions,
+                             # products, inventory, sales, wastage, etl, reports
     requirements.txt
-    .env.example
+    .env.example             # Template only — copy to .env locally (never commit .env)
   frontend/
     src/
-      App.jsx                 router
-      main.jsx                bootstraps providers
-      api.js                  thin fetch wrapper (with demo-mode shim)
-      demo.js                 in-memory mock data for offline preview
-      context/SessionContext.jsx     shop+staff session
-      components/             ShopLockGate, Layout, Modal, Toast, CrudTable
-      pages/                  POS, Wastage, Reports, Sync, admin/*
+      App.jsx, api.js, demo.js
+      context/SessionContext.jsx    # Shop + staff lock (pseudo-session)
+      pages/POS.jsx, Wastage.jsx, Reports.jsx, admin/*
+      utils/stock.js               # Client-side stock helpers for UX
 ```
 
-## Quickest preview (no Cloud setup)
-
-You can launch the UI with mocked data in under a minute:
+### Quick preview (no cloud)
 
 ```bash
-cd frontend
-npm install
-npm run demo          # serves on http://localhost:5173 with VITE_DEMO=true
+cd frontend && npm install && npm run demo
 ```
 
-A yellow banner at the top of every page shows you're in demo mode. The
-Reports page shows representative dummy charts. Nothing persists.
+Opens the UI with **in-memory mock data** (`VITE_DEMO=true`). Nothing persists; use for UI screenshots only.
 
-## Local dev against the real Google Cloud stack
+### Local development (real stack)
 
-Two terminals.
-
-### Terminal 1 - backend
+**Terminal 1 — backend**
 
 ```bash
 cd backend
-python -m venv .venv && source .venv/bin/activate
+python -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
-cp .env.example .env        # then fill in real values
+cp .env.example .env   # Fill with real values (never commit)
 
-# ADC for both Cloud SQL Connector and BigQuery client
-gcloud auth application-default login
+gcloud auth application-default login   # Cloud SQL Connector + BigQuery from laptop
 
 cd ..
 uvicorn backend.main:app --reload --port 8000
 ```
 
-### Terminal 2 - frontend
+**Terminal 2 — frontend**
 
 ```bash
-cd frontend
-npm install
-npm run dev          # Vite on :5173, proxies /api to :8000
+cd frontend && npm install && npm run dev
 ```
 
-Open <http://localhost:5173>, choose a shop and a staff member, and you're in.
+Vite proxies `/api` to `http://127.0.0.1:8000`. Open `http://localhost:5173`, pick **shop + staff** on the lock screen.
 
-### Required environment variables
+### Environment variables
 
-| Variable | Example | Purpose |
-| --- | --- | --- |
-| `DB_USER` | `pos-app` | Postgres role on the Cloud SQL instance |
-| `DB_PASS` | `s3cret` | Postgres password |
-| `DB_NAME` | `butchery` | Postgres database name |
-| `INSTANCE_CONNECTION_NAME` | `my-project:australia-southeast1:butchery-sql` | `project:region:instance` |
-| `PRIVATE_IP` | empty | Set to a non-empty value to use the instance's private IP |
-| `BQ_PROJECT_ID` | `my-project` | GCP project that owns the BigQuery warehouse |
-| `BQ_DATASET` | `Our_data_warehouse` | Dataset name (defaults to `Our_data_warehouse`) |
-| `EXTRA_CORS_ORIGINS` | empty | Comma-separated extra origins for local dev |
+See `backend/.env.example`. Typical variables:
 
-Template lives in `backend/.env.example`.
+| Variable | Purpose |
+| --- | --- |
+| `INSTANCE_CONNECTION_NAME` | `project:region:instance` for Cloud SQL |
+| `DB_USER`, `DB_PASS`, `DB_NAME` | PostgreSQL credentials |
+| `PRIVATE_IP` | Non-empty → use instance private IP |
+| `BQ_PROJECT_ID`, `BQ_DATASET` | BigQuery project and dataset for Reports |
+| `EXTRA_CORS_ORIGINS` | Optional comma-separated origins for dev |
 
-## Deploy to Cloud Run
+The POS service triggers ETL via `POST /api/etl/sync` (see `backend/routers/etl.py`), which performs an **HTTP GET** to your separate Cloud Run ETL URL (`ETL_URL` in `backend/routers/etl.py`). Ensure that URL and IAM (`run.invoker` on the ETL service when ingress is restricted) match your deployment.
 
-The whole stack ships as one Cloud Run service. From the repo root:
+### Deploy POS to Cloud Run (monolith)
+
+From repo root (adjust names):
 
 ```bash
-PROJECT=my-project
+PROJECT=your-gcp-project
 REGION=australia-southeast1
-INSTANCE=$PROJECT:$REGION:butchery-sql
+INSTANCE=$PROJECT:$REGION:your-cloud-sql-instance
 
 gcloud run deploy butchery-pos \
   --source . \
   --region $REGION \
   --allow-unauthenticated \
   --add-cloudsql-instances $INSTANCE \
-  --set-env-vars "DB_USER=pos-app,DB_PASS=*****,DB_NAME=butchery,INSTANCE_CONNECTION_NAME=$INSTANCE,BQ_PROJECT_ID=$PROJECT,BQ_DATASET=Our_data_warehouse"
+  --set-env-vars "DB_USER=...,DB_PASS=...,DB_NAME=...,INSTANCE_CONNECTION_NAME=$INSTANCE,BQ_PROJECT_ID=$PROJECT,BQ_DATASET=Our_data_warehouse"
 ```
 
-Cloud Run builds the `Dockerfile` automatically. After the first deploy, open
-the printed URL - the React UI is at `/` and the API is at `/api/*`.
+Grant the service account **Cloud SQL Client** and BigQuery **Data Viewer** + **Job User** (see `.env.example` / prior docs).
 
-### IAM grants the Cloud Run service account needs
+### Important product behaviours (factually correct for reports)
 
-```bash
-SA=$(gcloud run services describe butchery-pos --region $REGION --format='value(spec.template.spec.serviceAccountName)')
+- **Shop + staff lock**: Not password login; users select **shop** and **staff** once; values are stored in React context / `localStorage` and sent on writes (`shop_id`, `staff_id`).
+- **Sales**: Single DB transaction — insert `sales`, then `sale_items`, then **reduce inventory** per line; **`stock_level` cannot go negative** (server rejects oversell).
+- **Wastage**: Same inventory rule; **`staff_id`** is stored on each wastage row in the running application (your coursework DDL snippet may omit `staff_id`; production schema used by the app and ETL includes it — reconcile diagrams with your live database).
+- **Inventory**: `GET /api/inventory`, `POST /api/inventory/restock`; first sale/wastage can create an inventory row; restocks bump stock and set `last_restock_date`.
+- **Reports**: On load, frontend calls **`POST /api/etl/sync`**, waits for success, then queries **`/api/reports/*`** with optional **`shop_id`** (current shop, all shops, or chosen shop).
 
-gcloud projects add-iam-policy-binding $PROJECT --member="serviceAccount:$SA" --role="roles/cloudsql.client"
-gcloud projects add-iam-policy-binding $PROJECT --member="serviceAccount:$SA" --role="roles/bigquery.dataViewer"
-gcloud projects add-iam-policy-binding $PROJECT --member="serviceAccount:$SA" --role="roles/bigquery.jobUser"
-```
+---
 
-If your ETL Cloud Run service requires authentication, also grant the POS
-service account `roles/run.invoker` on the ETL service.
+## Part B — Assignment 2 report companion
 
-## Design notes
+The official template expects: **Introduction → System Architecture (ETL + reporting app) → ETL task flows → Application task flows → Interface design → Hardware/software → System testing** (procedure, cases, results, incidents). The **high-performing example** (POSsible) uses **class/deployment diagrams**, **swimlanes**, **navigation diagram**, **annotated UI screenshots**, and **test tables** mapped to **functional requirement IDs**. Your group should **reuse that structure** but replace every technical claim with **Butchery POS + GCP + your ETL script**.
 
-### Shop + Staff session lock
+Below is **what to document**, **which diagrams to draw**, and **accurate technical facts** sourced from this repo and the ETL you supplied.
 
-The spec asks for a Shop-Lock pseudo-login, but `sales` and `wastage` both
-have `staff_id NOT NULL`. The lock screen asks for **both** a shop and a
-staff member. Both are stored in `localStorage` under one React Context and
-attached to every mutating request. "Switch shop / staff" in the sidebar
-clears the session.
+### B.1 Introduction (Section 1)
 
-### Defensive transaction handling
+Suggested content:
 
-`POST /api/sales` wraps the parent insert and the children inserts in a
-single SQLAlchemy `db.begin()` block. If any child item violates a foreign
-key, the whole transaction rolls back and the API returns HTTP 400 with the
-DB error in `detail`, which the frontend surfaces in a red toast.
+- **Business context**: Multi-location butcher; need unified OLTP, stock discipline, wastage tracking, and franchise-ready analytics.
+- **Product aim**: Web POS + admin master data + inventory + BigQuery reporting after controlled ETL.
+- **Scope**: Cloud-hosted OLTP and warehouse; no on-prem servers; ETL as a managed Cloud Run HTTP function; reporting embedded in the SPA (not Tableau in this project — say so clearly).
+- **Definitions table**: POS, ETL, OLTP, DWH, BI, GCP (Cloud Run, Cloud SQL, BigQuery), `shop_id` scoping, etc.
+- **Contribution table**: List each member and deliverables (diagrams, report sections, testing, deployment).
 
-The total amount is recomputed server-side from the items
-(`sum(quantity * price_at_sale - discount_applied)`). The `payment_method`
-field is a Pydantic enum (`Cash` / `Card` / `EFTPOS`), so a tampered client
-cannot insert garbage. `WastageCreate.reason` is also an enum
-(`Expired`, `Fridge Failure`, `Spoiled`, `Damaged`, `Cross-Contamination`,
-`Cutting Error`, `Other`) to align with the BI dimension on the warehouse
-side.
+### B.2 System Architecture — ETL (Template §2.1, marks ~2)
 
-### Reporting page (BigQuery-backed)
+**Diagram type**: **Deployment diagram** (recommended) or high-level component diagram.
 
-The Reports page hits 8 dedicated endpoints under `/api/reports/*`, each
-running a single parameterised SQL query against the warehouse:
+**Nodes to show** (adjust naming to match your diagram tool):
 
-| Endpoint | Source tables | Purpose |
+1. **Operational DB**: Cloud SQL PostgreSQL (`ops_store` / your DB name) — source of truth for dimensions and facts at grain of `sales`, `sale_items`, `wastage`, etc.
+2. **ETL runtime**: Cloud Run service executing your Python (`functions_framework`, `pandas`, SQLAlchemy + Connector).
+3. **Warehouse**: BigQuery project + dataset `Our_data_warehouse`.
+4. **Optional**: Arrow from POS Cloud Run → ETL trigger (HTTP GET/POST as implemented) → ETL reads Cloud SQL → writes BigQuery.
+
+**Description paragraph ideas**:
+
+- **Extract**: SQL via SQLAlchemy+pandas `read_sql` from Postgres (dimensions full snapshots; facts incremental by timestamp watermark read from BigQuery `MAX(...)`).
+- **Transform**: pandas — revenue, COGS, profit, tax (10%), hour/day labels; promotion filtering; string normalisation (e.g. title case product names, upper categories/reasons).
+- **Load**: `load_table_from_dataframe` with `WRITE_TRUNCATE` for dimensions and `WRITE_APPEND` for facts.
+
+Reference the **exact dimension/fact names** from [ETL pipeline](#etl-pipeline-cloud-run--behaviour) below.
+
+### B.3 System Architecture — Reporting application (Template §2.2, marks ~3)
+
+**Diagram type**: **UML component/class-style** “reporting slice” — not every React component, but **layers**:
+
+- **Browser**: React SPA (pages: POS, Wastage, Reports, Admin CRUD, Inventory).
+- **POS Cloud Run service**: FastAPI routers `/api/*`, static files `/`.
+- **Cloud SQL**: OLTP reads/writes from routers (`sales`, `inventory`, `wastage`, …).
+- **BigQuery**: Read-only from `reports.py` via parameterized SQL.
+- **ETL Cloud Run**: Invoked from `/api/etl/sync` before dashboards refresh.
+
+You can draw **one composite diagram** or **per-feature mini architectures** (example report did Login, Order, … — you might do **POS Sale**, **Wastage**, **Reports+ETL**, **Admin Master Data**).
+
+### B.4 ETL task flow design (Template §3, marks ~4)
+
+**Diagram type**: **Activity** or **swimlane** with lanes such as *Scheduler/User*, *ETL Service*, *Cloud SQL*, *BigQuery*.
+
+**Suggested swimlanes for one consolidated diagram**:
+
+1. Trigger (HTTP request / user opens Reports).
+2. Connect Postgres (Connector `pg8000`).
+3. **Dimension sync** (parallel or sequential): query → dataframe → transform → `WRITE_TRUNCATE` to `dim_products`, `dim_promotions`, `dim_shops`, `dim_staff`, `dim_customers`.
+4. **Fact 1 — Sales**: read `max(sale_timestamp)` from `fact_sales_performance` → incremental SQL on `sale_items` + `sales` + `products` → compute metrics → `WRITE_APPEND`.
+5. **Fact 2 — Wastage**: read `max(event_timestamp)` from `fact_wastage_loss` → incremental `wastage` join `products` → `WRITE_APPEND`.
+6. **Fact 3 — Marketing**: read `max(sale_timestamp)` from `fact_marketing_impact` → incremental rows where `promo_id IS NOT NULL` → `WRITE_APPEND`.
+7. Return HTTP **200** with a **plain-text summary** message (`ETL Success: …`) concatenating dimension sync plus sales/wastage/marketing statuses — unless an exception occurs (**500** with `Critical ETL Error: …`).
+
+If the assignment expects **one diagram per “functional area”**, split into: **Dimension refresh**, **Sales fact load**, **Wastage fact load**, **Marketing fact load** — each with explicit **Extract / Transform / Load** subprocess labels.
+
+### B.5 Reporting application task flow design (Template §4, marks ~6)
+
+Template: if you have **six functional requirements**, six **activity/swimlane** diagrams at design level.
+
+Map **your FR IDs from Assignment 1** to features; example mapping **you must reconcile with your actual FR table**:
+
+| Suggested theme | Implementation entry points | Swimlane actors (example) |
 | --- | --- | --- |
-| `/kpis` | `fact_sales_performance`, `fact_wastage_loss` | Headline KPI cards |
-| `/revenue-trend` | `fact_sales_performance` | Daily revenue / profit / transactions line chart |
-| `/sales-velocity` | `fact_sales_performance` | Hour-of-day and day-of-week bar charts |
-| `/top-products` | `fact_sales_performance`, `dim_products` | Top 10 by net profit |
-| `/category-mix` | `fact_sales_performance`, `dim_products` | Category donut |
-| `/wastage-summary` | `fact_wastage_loss`, `dim_products` | Loss by reason + top wasted SKUs |
-| `/staff-performance` | `fact_sales_performance`, `dim_staff` | Per-staff sales table |
-| `/promo-roi` | `fact_marketing_impact`, `dim_promotions` | Promotional cannibalisation |
+| Shop/staff context | `ShopLockGate.jsx`, `SessionContext.jsx` | User, Browser, `/api/shops`, `/api/staff` |
+| POS sale | `POS.jsx`, `POST /api/sales` | Cashier, API, Postgres (`sales`, `sale_items`, `inventory`) |
+| Wastage | `Wastage.jsx`, `POST /api/wastage` | Staff, API, Postgres (`wastage`, `inventory`) |
+| Inventory / restock | `admin/Inventory.jsx`, `/api/inventory` | Manager, API, Postgres (`inventory`) |
+| Master data admin | `CrudTable.jsx`, `/api/products`, categories, suppliers, … | Manager, API, Postgres |
+| Reports + ETL | `Reports.jsx`, `POST /api/etl/sync`, `/api/reports/*` | Analyst, POS backend, ETL service, BigQuery |
 
-All eight endpoints take an optional query parameter ``shop_id``. When it is
-**present**, results are scoped to that location. When it is **omitted**,
-BigQuery aggregates across **every shop** in the franchise (franchise-wide
-reporting). The Reports UI defaults to the locked shop and includes a
-dropdown to switch between **current shop**, **all locations**, or **another
-specific shop**.
+For **each** diagram, add a **short table** (like the example report): Case ID, FR ID, description, basic flow, alternatives, pre/post conditions.
 
-When the user opens the Reports page the frontend first calls
-`POST /api/etl/sync` and **blocks** the UI with a spinner until the Cloud
-Run ETL completes, *then* loads the eight report endpoints in parallel.
-This guarantees the BI dashboards always reflect the latest sales and
-wastage that have been entered through the POS today. Changing the date
-range refetches the charts but does not re-trigger the ETL.
+### B.6 Interface design (Template §5)
 
-### One Cloud Run service for everything
+#### 5.1 ETL interface design (marks ~4)
 
-The Dockerfile is a two-stage build: stage 1 runs `npm run build` to
-produce `frontend/dist`, stage 2 copies that into the Python image and
-FastAPI serves it via `StaticFiles`. Same origin for API and UI means no
-CORS headaches and a single URL for users.
+There is **no separate ETL GUI**. The **interface** is:
+
+- **Indirect**: Reports page **button/spinner** → triggers `POST /api/etl/sync`.
+- **Technical**: Cloud Run logs / response payload.
+
+For the report, draw **one “ETL interface” diagram per convention**: **User → Reports UI → API `/etl/sync` → ETL Cloud Run → BigQuery**, with annotations for success/failure (502 if ETL unreachable). State honestly that operators do not edit ETL mappings in-app.
+
+#### 5.2 Application navigation design (marks ~2)
+
+Draw a **box diagram**: **Shop lock** → **POS (home)** branches to **Wastage**, **Reports**, **Admin** (Products, Categories, Suppliers, Customers, Promotions, Staff, Shops, **Inventory**) → **Switch shop/staff**.
+
+Mirror routes in `frontend/src/App.jsx` and `Layout.jsx`.
+
+#### 5.3 Application user interface design (marks ~4)
+
+Screenshots with captions:
+
+- Shop/staff lock modal.
+- POS grid + cart + payment + stock hints.
+- Wastage form + on-hand helper text.
+- Inventory restock + stock table.
+- One admin CRUD example (e.g. Products).
+- Reports: KPI cards + charts + scope dropdown + date range + “Refresh data”.
+
+Tag each with **`[UI Design ID]`** and **`[Functional Requirement ID]`** exactly as your group defines them.
+
+### B.7 Hardware and software tools (Template §6)
+
+- **Hardware**: Staff devices (PC/tablet), browser; optional second monitor; cloud runs on Google infrastructure (document as “hosted — no local warehouse server”).
+- **Software**: Python 3, Node.js/npm, PostgreSQL (Cloud SQL), BigQuery, Docker, `gcloud`, libraries listed in **Stack** table.
+
+Optional small diagram: **Browser ↔ FastAPI ↔ Cloud SQL / BigQuery ↔ ETL**.
+
+### B.8 System testing (Template §7, marks ~8)
+
+#### 7.1 Final system URLs & artefact locations
+
+Fill in **when published**:
+
+| Item | Where to record |
+| --- | --- |
+| Deployed POS URL | Cloud Run URL (`https://….run.app`) |
+| GitHub repository | Public/private repo URL — **this README must exist** |
+| OLTP | Cloud SQL instance id + database name (no passwords) |
+| Warehouse | GCP project + BigQuery dataset `Our_data_warehouse` |
+| ETL | Cloud Run service URL for ETL |
+
+#### 7.2 Test procedure
+
+Follow a numbered procedure (environment ready → open browser → run cases → log incidents → summarise). Reference Godfrey-style structure if your subject outline requires it.
+
+#### 7.3 Test cases (marks ~6)
+
+Design **at least six** cases tied to **your FR IDs**. Example **themes** (rewrite to match your specification wording):
+
+1. Shop/staff selection persists and constrains API payloads.
+2. Complete sale reduces inventory and rejects oversell.
+3. Wastage rejected when quantity exceeds on-hand stock.
+4. Restock increases inventory and updates last restock timestamp.
+5. Admin CRUD on a master entity (e.g. product) validates constraints.
+6. Reports: ETL completes then KPI/charts load; changing `shop_id` scope changes aggregates.
+
+Each case: **identifier**, **FR ID**, **environment needs**, **inputs → expected outputs** table.
+
+#### 7.4 Test results
+
+Tables for **two browsers or OS** if required; **incident report** rows for failures with honest reasons (e.g. demo mode vs production).
+
+---
+
+## Operational database (OLTP) schema summary
+
+Enterprise PostgreSQL schema (teaching DDL excerpt — fix spacing/`NOT NULL` when you paste into the report). Tables:
+
+| Table | Role |
+| --- | --- |
+| `shops` | Locations |
+| `shop_staff` | Staff belonging to a shop |
+| `product_categories`, `suppliers`, `customers`, `promotions` | Dimensions / masters |
+| `products` | SKU catalogue (`unit_price`, `cost_price`, `unit_measure`, FKs) |
+| `sales` | Header: shop, staff, optional customer/promo, payment, total, timestamp |
+| `sale_items` | Lines: quantity, price, discount; FK `sale_id` ON DELETE CASCADE |
+| `inventory` | Per `(shop_id, product_id)` stock + `last_restock_date` |
+| `wastage` | Shop, product, quantity, reason, timestamp — **running system also stores `staff_id`** for accountability and ETL joins |
+
+**Report note**: If your written DDL omits `staff_id` on `wastage`, add an appendix sentence: *live schema includes `staff_id` aligned with the application and ETL.*
+
+---
+
+## ETL pipeline (Cloud Run) — behaviour
+
+The warehouse loader is a **separate Cloud Run service** (your deployed bundle uses **`functions_framework.http`** with handler **`run_etl_process`**). Configuration lives at the top of that script: **GCP project id**, **`INSTANCE_CONNECTION_NAME`** (`project:region:butchery-ops-db`), **Cloud SQL** credentials (`DB_USER`, `DB_PASS`, `DB_NAME`), and **`DATASET`** (typically `Our_data_warehouse`).
+
+**Do not commit database passwords** in source control or paste them into the assignment PDF — use **Secret Manager** or Cloud Run **secrets-as-environment-variables**. Rotate any credential that has appeared in chat or an old revision.
+
+### End-to-end flow
+
+1. **Connect**: Cloud SQL Python Connector + SQLAlchemy `create_engine("postgresql+pg8000://", creator=getconn)`.
+2. **Dimensions (`WRITE_TRUNCATE`)**: load pandas frames via `read_sql`, then `bigquery.Client.load_table_from_dataframe`.
+   - **`dim_products`**: `products` **inner join** `product_categories` and `suppliers` — exposes `product_id`, `product_name`, `category`, `supplier`, `current_retail_price`, `current_cost_price`, **`unit_measure`**. Transformations: `unit_measure` null→empty string; product title-case; category upper-case; price columns as float.
+   - **`dim_promotions`**: `promo_id`, `promo_name`, `discount_percent`, `is_active`.
+   - **`dim_shops`**, **`dim_staff`**, **`dim_customers`**: `SELECT *` from OLTP mirror tables.
+3. **Facts (`WRITE_APPEND`, incremental)** — each reads **`MAX(timestamp)`** from the target BigQuery table (fallback **1970-01-01** if missing/error):
+   - **`fact_sales_performance`**: join `sale_items` ↔ `sales` ↔ `products` where `sales.created_at > watermark`; derive gross/net revenue, COGS, profit, tax (~10%), `hour_of_day`, `day_name`.
+   - **`fact_wastage_loss`**: `wastage` ↔ `products` where `wastage.created_at > watermark`; includes **`staff_id`**; derives `total_loss_value`; uppercases `reason`.
+   - **`fact_marketing_impact`**: sale lines where **`promo_id IS NOT NULL`** and `created_at > watermark`; captures quantities and discount vs pre-discount gross.
+
+Incremental predicates embed the watermark inside SQL built as Python strings (not parameterized bind placeholders). That matches your running implementation but is brittle from an injection standpoint — timestamps originate only from BigQuery max-queries.
+
+### Dimensions — full refresh (`WRITE_TRUNCATE`)
+
+| BigQuery table | Source (Postgres) | Notes |
+| --- | --- | --- |
+| `dim_products` | `products` INNER JOIN `product_categories`, `suppliers` | Includes **`unit_measure`**; inner joins mean rows **without** category/supplier FKs do **not** appear |
+| `dim_promotions` | `promotions` | |
+| `dim_shops` | `shops` | |
+| `dim_staff` | `shop_staff` | |
+| `dim_customers` | `customers` | |
+
+### Facts — incremental (`WRITE_APPEND`)
+
+Watermarks: query **BigQuery** `MAX(timestamp)` per fact table (fallback to epoch if empty/error).
+
+| Fact table | Grain | Incremental filter | Key metrics computed in ETL |
+| --- | --- | --- | --- |
+| `fact_sales_performance` | Sale line + product cost snapshot | `sales.created_at > watermark` | `gross_revenue`, `net_revenue`, `total_cogs`, `net_profit`, `tax_amount` (~10%), `hour_of_day`, `day_name` |
+| `fact_wastage_loss` | Wastage event | `wastage.created_at > watermark` | `total_loss_value = quantity_wasted * cost_price`, reason uppercased |
+| `fact_marketing_impact` | Sale lines with promo | `promo_id IS NOT NULL` and `created_at > watermark` | Pre-discount gross, discount given, quantities |
+
+**Success response**: HTTP **200** body is a single string such as `ETL Success: Added … | … | …` (not JSON). The POS backend treats non-JSON bodies gracefully where implemented.
+
+**Partitioning** (warehouse DDL): facts partitioned by `DATE(..._timestamp)`.
+
+---
+
+## Data warehouse (BigQuery) schema summary
+
+Dataset: **`Our_data_warehouse`** (adjust if renamed).
+
+**Dimensions**: `dim_products` (including **`unit_measure`** from OLTP), `dim_shops`, `dim_staff`, `dim_customers`, `dim_promotions`.
+
+**Facts**: `fact_sales_performance`, `fact_wastage_loss`, `fact_marketing_impact` — columns as in your BigQuery `CREATE TABLE` definitions; Reports router queries these names.
+
+---
+
+## Application backend & frontend map
+
+### Key API groups (`/api/...`)
+
+| Prefix | Purpose |
+| --- | --- |
+| `/shops`, `/staff` | Locations and staff lists |
+| `/categories`, `/suppliers`, `/customers`, `/promotions`, `/products` | Admin CRUD |
+| `/inventory` | List by shop; restock |
+| `/sales` | List; create sale + items + stock decrement |
+| `/wastage` | List; create wastage + stock decrement |
+| `/etl/sync` | Proxy trigger to ETL Cloud Run |
+| `/reports/*` | KPIs, trends, velocity, products, categories, wastage, staff, promo ROI |
+
+### Reports endpoints (for citing in report)
+
+Reports module queries BigQuery with optional **`shop_id`** — omit for franchise-wide aggregates.
+
+Typical endpoints: `kpis`, `revenue-trend`, `sales-velocity`, `top-products`, `category-mix`, `wastage-summary`, `staff-performance`, `promo-roi` (exact paths under `/api/reports/` in `backend/routers/reports.py`).
+
+---
+
+## Marking sheet alignment (quick reference)
+
+| Component (from sheet) | Where this README helps |
+| --- | --- |
+| ETL Architecture §2.1 | Deployment diagram + narrative + [ETL pipeline](#etl-pipeline-cloud-run--behaviour) |
+| Reporting Application Architecture §2.2 | Layers POS ↔ API ↔ OLTP/BQ/ETL |
+| ETL Task Flow §3 | Swimlanes + Extract/Transform/Load |
+| Reporting Task Flow §4 | Per-FR flows + tables |
+| ETL Interface §5.1 | Reports trigger + API — no standalone ETL UI |
+| Navigation §5.2 | Routes from `App.jsx` / `Layout.jsx` |
+| UI §5.3 | Screenshots + FR/UI IDs |
+| Code / DW implementation | Honest description + GitHub + GCP locations |
+| Testing §7 | Procedure + FR-linked cases + results |
+
+---
+
+## Maintenance
+
+- Keep **secrets out of git**: use `.env` locally and Cloud Run **secrets/env vars** in production.
+- After schema changes, update **ORM** (`backend/models.py`), **ETL script**, and **BigQuery DDL** together, then refresh this README’s tables.
+
+**Placeholder**: Replace generic URLs and project ids in student-written sections with your group’s real Cloud Run URL, GitHub repo, and (non-secret) resource names.
