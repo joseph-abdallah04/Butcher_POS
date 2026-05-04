@@ -161,9 +161,9 @@ Suggested content:
 
 **Description paragraph ideas**:
 
-- **Extract**: SQL via SQLAlchemy+pandas `read_sql` from Postgres (dimensions full snapshots; facts incremental by timestamp watermark read from BigQuery `MAX(...)`).
+- **Extract**: SQL via SQLAlchemy+pandas `read_sql` from Postgres — dimensions and facts are read as **full snapshots** for each sync (no BigQuery watermark or “since last run” filter).
 - **Transform**: pandas — revenue, COGS, profit, tax (10%), hour/day labels; promotion filtering; string normalisation (e.g. title case product names, upper categories/reasons).
-- **Load**: `load_table_from_dataframe` with `WRITE_TRUNCATE` for dimensions and `WRITE_APPEND` for facts.
+- **Load**: `bigquery.Client.load_table_from_dataframe` — dimension tables are **replaced** from each run’s dataframe; each fact table is **cleared for the run** then **loaded** with the freshly built rows so the warehouse matches current OLTP content.
 
 Reference the **exact dimension/fact names** from [ETL pipeline](#etl-pipeline-cloud-run--behaviour) below.
 
@@ -187,10 +187,10 @@ You can draw **one composite diagram** or **per-feature mini architectures** (ex
 
 1. Trigger (HTTP request / user opens Reports).
 2. Connect Postgres (Connector `pg8000`).
-3. **Dimension sync** (parallel or sequential): query → dataframe → transform → `WRITE_TRUNCATE` to `dim_products`, `dim_promotions`, `dim_shops`, `dim_staff`, `dim_customers`.
-4. **Fact 1 — Sales**: read `max(sale_timestamp)` from `fact_sales_performance` → incremental SQL on `sale_items` + `sales` + `products` → compute metrics → `WRITE_APPEND`.
-5. **Fact 2 — Wastage**: read `max(event_timestamp)` from `fact_wastage_loss` → incremental `wastage` join `products` → `WRITE_APPEND`.
-6. **Fact 3 — Marketing**: read `max(sale_timestamp)` from `fact_marketing_impact` → incremental rows where `promo_id IS NOT NULL` → `WRITE_APPEND`.
+3. **Dimension sync** (parallel or sequential): query → dataframe → transform → load into `dim_products`, `dim_promotions`, `dim_shops`, `dim_staff`, `dim_customers` so each table reflects **only** the current extraction.
+4. **Fact 1 — Sales**: SQL on `sale_items` + `sales` + `products` (full extract) → compute line metrics → load into **`fact_sales_performance`** after clearing that fact for the run.
+5. **Fact 2 — Wastage**: `wastage` join `products` (full extract) → derive loss fields → load into **`fact_wastage_loss`** after clearing that fact for the run.
+6. **Fact 3 — Marketing**: sale lines where **`promo_id IS NOT NULL`** (full extract) → load into **`fact_marketing_impact`** after clearing that fact for the run.
 7. Return HTTP **200** with a **plain-text summary** message (`ETL Success: …`) concatenating dimension sync plus sales/wastage/marketing statuses — unless an exception occurs (**500** with `Critical ETL Error: …`).
 
 If the assignment expects **one diagram per “functional area”**, split into: **Dimension refresh**, **Sales fact load**, **Wastage fact load**, **Marketing fact load** — each with explicit **Extract / Transform / Load** subprocess labels.
@@ -314,18 +314,16 @@ Your deployed bundle uses **`functions_framework.http`** with handler **`run_etl
 ### End-to-end flow
 
 1. **Connect**: Cloud SQL Python Connector + SQLAlchemy `create_engine("postgresql+pg8000://", creator=getconn)`.
-2. **Dimensions (`WRITE_TRUNCATE`)**: load pandas frames via `read_sql`, then `bigquery.Client.load_table_from_dataframe`.
+2. **Dimensions**: read OLTP into pandas via `read_sql`, apply transforms, then load with **`bigquery.Client.load_table_from_dataframe`** so each dimension table is **replaced** by the current snapshot.
    - **`dim_products`**: `products` **inner join** `product_categories` and `suppliers` — exposes `product_id`, `product_name`, `category`, `supplier`, `current_retail_price`, `current_cost_price`, **`unit_measure`**. Transformations: `unit_measure` null→empty string; product title-case; category upper-case; price columns as float.
    - **`dim_promotions`**: `promo_id`, `promo_name`, `discount_percent`, `is_active`.
    - **`dim_shops`**, **`dim_staff`**, **`dim_customers`**: `SELECT *` from OLTP mirror tables.
-3. **Facts (`WRITE_APPEND`, incremental)** — each reads **`MAX(timestamp)`** from the target BigQuery table (fallback **1970-01-01** if missing/error):
-   - **`fact_sales_performance`**: join `sale_items` ↔ `sales` ↔ `products` where `sales.created_at > watermark`; derive gross/net revenue, COGS, profit, tax (~10%), `hour_of_day`, `day_name`.
-   - **`fact_wastage_loss`**: `wastage` ↔ `products` where `wastage.created_at > watermark`; includes **`staff_id`**; derives `total_loss_value`; uppercases `reason`.
-   - **`fact_marketing_impact`**: sale lines where **`promo_id IS NOT NULL`** and `created_at > watermark`; captures quantities and discount vs pre-discount gross.
+3. **Facts** — for each fact, the job **clears the target BigQuery table for that run**, reads **all** matching OLTP rows (see reference `ETL Pipeline/etl_pipeline.py`), transforms where applicable, then loads the new rows:
+   - **`fact_sales_performance`**: `sale_items` ⋈ `sales` ⋈ `LEFT JOIN products`; derive gross/net revenue, COGS, profit, tax (~10%), `hour_of_day`, `day_name`.
+   - **`fact_wastage_loss`**: `wastage` ⋈ `LEFT JOIN products`; includes **`staff_id`**; derives `total_loss_value`; uppercases `reason`.
+   - **`fact_marketing_impact`**: sale lines where **`promo_id IS NOT NULL`**; captures quantities and discount vs pre-discount gross.
 
-Incremental predicates embed the watermark inside SQL built as Python strings (not parameterized bind placeholders). That matches your running implementation but is brittle from an injection standpoint — timestamps originate only from BigQuery max-queries.
-
-### Dimensions — full refresh (`WRITE_TRUNCATE`)
+### Dimensions — snapshot each sync
 
 | BigQuery table | Source (Postgres) | Notes |
 | --- | --- | --- |
@@ -335,15 +333,15 @@ Incremental predicates embed the watermark inside SQL built as Python strings (n
 | `dim_staff` | `shop_staff` | |
 | `dim_customers` | `customers` | |
 
-### Facts — incremental (`WRITE_APPEND`)
+### Facts — snapshot each sync
 
-Watermarks: query **BigQuery** `MAX(timestamp)` per fact table (fallback to epoch if empty/error).
+Each fact reload is a **full extract** from OLTP for that grain; there is **no** “load only rows newer than the last warehouse timestamp” step.
 
-| Fact table | Grain | Incremental filter | Key metrics computed in ETL |
+| Fact table | Grain | Extract scope | Key metrics computed in ETL |
 | --- | --- | --- | --- |
-| `fact_sales_performance` | Sale line + product cost snapshot | `sales.created_at > watermark` | `gross_revenue`, `net_revenue`, `total_cogs`, `net_profit`, `tax_amount` (~10%), `hour_of_day`, `day_name` |
-| `fact_wastage_loss` | Wastage event | `wastage.created_at > watermark` | `total_loss_value = quantity_wasted * cost_price`, reason uppercased |
-| `fact_marketing_impact` | Sale lines with promo | `promo_id IS NOT NULL` and `created_at > watermark` | Pre-discount gross, discount given, quantities |
+| `fact_sales_performance` | Sale line + product cost snapshot | All `sale_items` joined to `sales` (with product cost) | `gross_revenue`, `net_revenue`, `total_cogs`, `net_profit`, `tax_amount` (~10%), `hour_of_day`, `day_name` |
+| `fact_wastage_loss` | Wastage event | All `wastage` rows joined to products for cost | `total_loss_value = quantity_wasted * cost_price`, reason uppercased |
+| `fact_marketing_impact` | Sale lines with promo | All lines where `promo_id IS NOT NULL` | Pre-discount gross, discount given, quantities |
 
 **Success response**: HTTP **200** body is a single string such as `ETL Success: Added … | … | …` (not JSON). The POS backend treats non-JSON bodies gracefully where implemented.
 
@@ -447,7 +445,7 @@ This section ties together **(1)** column-level transforms in **`ETL Pipeline/et
 | `hour_of_day` | `sale_timestamp.dt.hour` |
 | `day_name` | `sale_timestamp.dt.day_name()` (e.g. `Monday`) |
 
-**Load:** rows appended after `TRUNCATE` of the fact table (full-refresh pattern in this script).
+**Load:** each sync **rebuilds** the fact table from the OLTP extract for that run (see reference `ETL Pipeline/etl_pipeline.py`).
 
 #### Fact 2 — `fact_wastage_loss` (one row per wastage event)
 

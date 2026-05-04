@@ -64,7 +64,7 @@ The Python entrypoint **`etl_pipeline.py`** and **`Data_warehouse_schema.sql`** 
 
 1. **Transactional Write:** POS sales and wastage events are recorded in Cloud SQL.
 2. **Dashboard Access:** Navigating to the Reports page in the React frontend triggers a POST request to the Cloud Run ETL service.
-3. **Data Sync:** The ETL service extracts the latest records from Postgres, cleans the data using Pandas, and loads it into BigQuery.
+3. **Data Sync:** The ETL service re-reads Postgres, applies transforms in Pandas, and reloads the BigQuery tables so each sync reflects the **current** OLTP snapshot.
 4. **Analytical Query:** The frontend requests specific report data from the FastAPI backend (e.g., `/api/reports/kpis`).
 5. **BQ Execution:** The backend runs specialized SQL against the warehouse and returns the results as JSON.
 6. **Visualization:** Data is rendered instantly in the app using Recharts, providing real-time visibility into net profit, wastage, and marketing ROI.
@@ -79,11 +79,11 @@ Below, **Extract** is what is read from Postgres (SQL strings or `SELECT *`). **
 
 | BigQuery table | Extract | Transform (pandas) | Load |
 | --- | --- | --- | --- |
-| **`dim_products`** | `sql_prod`: join `products` → `product_categories` → `suppliers`; aliases `product_id`, `product_name`, `category`, `supplier`, `current_retail_price`, `current_cost_price`, `unit_measure`. | **`unit_measure`:** `fillna` with empty string, then `astype(str)` (lines 42–43). **`product_name`:** cast to string, **title case** via `.str.title()` (43). **`category`:** cast to string, **uppercase** via `.str.upper()` (44). **`current_retail_price`**, **`current_cost_price`:** cast to **`float`** (45). | `WRITE_TRUNCATE` (46). |
-| **`dim_promotions`** | `promotions` with `id` → `promo_id`, plus `promo_name`, `discount_percent`, `is_active`. | **`discount_percent`:** `astype(float)` (49). | `WRITE_TRUNCATE` (50). |
-| **`dim_shops`** | `SELECT * FROM shops`. | **None** in script—dataframe as returned by the driver. | `WRITE_TRUNCATE` (52). |
-| **`dim_staff`** | `SELECT * FROM shop_staff` (loaded into table **`dim_staff`** in BQ). | **None** in script. | `WRITE_TRUNCATE` (53). |
-| **`dim_customers`** | `SELECT * FROM customers`. | **None** in script. | `WRITE_TRUNCATE` (54). |
+| **`dim_products`** | `sql_prod`: join `products` → `product_categories` → `suppliers`; aliases `product_id`, `product_name`, `category`, `supplier`, `current_retail_price`, `current_cost_price`, `unit_measure`. | **`unit_measure`:** `fillna` with empty string, then `astype(str)` (lines 42–43). **`product_name`:** cast to string, **title case** via `.str.title()` (43). **`category`:** cast to string, **uppercase** via `.str.upper()` (44). **`current_retail_price`**, **`current_cost_price`:** cast to **`float`** (45). | Load replaces the BigQuery table from the dataframe (line 46). |
+| **`dim_promotions`** | `promotions` with `id` → `promo_id`, plus `promo_name`, `discount_percent`, `is_active`. | **`discount_percent`:** `astype(float)` (49). | Load replaces the BigQuery table from the dataframe (line 50). |
+| **`dim_shops`** | `SELECT * FROM shops`. | **None** in script—dataframe as returned by the driver. | Load replaces the BigQuery table from the dataframe (line 52). |
+| **`dim_staff`** | `SELECT * FROM shop_staff` (loaded into table **`dim_staff`** in BQ). | **None** in script. | Load replaces the BigQuery table from the dataframe (line 53). |
+| **`dim_customers`** | `SELECT * FROM customers`. | **None** in script. | Load replaces the BigQuery table from the dataframe (line 54). |
 
 ### 6.2 Fact 1 — `fact_sales_performance`
 
@@ -103,7 +103,7 @@ Below, **Extract** is what is read from Postgres (SQL strings or `SELECT *`). **
 | `day_name` | String weekday name from `sale_timestamp.dt.day_name()` (e.g. `Monday`) (79). |
 | `quantity`, `price_at_sale`, `discount_applied`, `cost_price` | Normalised to **`float`** (80). |
 
-**Load:** `TRUNCATE` the BigQuery fact table, then **`WRITE_APPEND`** (58, 81).
+**Load:** the script clears the BigQuery fact table for this run, then loads the new rows (lines 58, 81).
 
 These columns are the ones declared in **`Data_warehouse_schema.sql`** for `fact_sales_performance` (including `gross_revenue` … `day_name`).
 
@@ -120,7 +120,7 @@ These columns are the ones declared in **`Data_warehouse_schema.sql`** for `fact
 | `reason` | Cast to string, **uppercase** with `.str.upper()` (102). |
 | `quantity_wasted`, `cost_price` | `astype(float)` (103–104). |
 
-**Load:** `TRUNCATE` then **`WRITE_APPEND`** (87, 105). Schema: **`Data_warehouse_schema.sql`** `fact_wastage_loss`.
+**Load:** same clear-then-load pattern (lines 87, 105). Schema: **`Data_warehouse_schema.sql`** `fact_wastage_loss`.
 
 ### 6.4 Fact 3 — `fact_marketing_impact`
 
@@ -131,7 +131,7 @@ These columns are the ones declared in **`Data_warehouse_schema.sql`** for `fact
 
 **Transform** (lines 124–126, if non-empty): `sale_timestamp` → `pd.to_datetime`; `quantity`, `discount_value_given`, `gross_revenue_pre_discount` → **`float`**. No further arithmetic in Python for this fact.
 
-**Load:** `TRUNCATE` then **`WRITE_APPEND`** (111, 127). Schema: **`Data_warehouse_schema.sql`** `fact_marketing_impact`.
+**Load:** same clear-then-load pattern (lines 111, 127). Schema: **`Data_warehouse_schema.sql`** `fact_marketing_impact`.
 
 ---
 
