@@ -20,7 +20,7 @@ const ADMIN = [
 ];
 
 export default function Layout() {
-  const { shop, staff, reset } = useSession();
+  const { shop, staff, reset, isManager } = useSession();
 
   return (
     <div className="flex h-screen">
@@ -28,17 +28,24 @@ export default function Layout() {
         <div className="border-b border-slate-800 px-4 py-4">
           <div className="text-lg font-bold">Butchery POS</div>
           <div className="mt-1 text-xs text-slate-400">{shop?.shop_name}</div>
-          <div className="text-xs text-slate-400">Staff: {staff?.staff_name}</div>
+          <div className="text-xs text-slate-400">
+            Staff: {staff?.staff_name}
+            {staff?.role ? ` (${staff.role})` : ''}
+          </div>
         </div>
         <nav className="flex-1 overflow-y-auto px-2 py-3">
           <SectionLabel>Operations</SectionLabel>
           {NAV.map((item) => (
             <NavItem key={item.to} {...item} />
           ))}
-          <SectionLabel>Admin</SectionLabel>
-          {ADMIN.map((item) => (
-            <NavItem key={item.to} {...item} />
-          ))}
+          {isManager && (
+            <>
+              <SectionLabel>Admin</SectionLabel>
+              {ADMIN.map((item) => (
+                <NavItem key={item.to} {...item} />
+              ))}
+            </>
+          )}
         </nav>
         <div className="border-t border-slate-800 p-3">
           <button type="button" className="btn-secondary w-full" onClick={reset}>

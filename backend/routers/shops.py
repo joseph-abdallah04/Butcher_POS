@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from ..database import get_db
+from ..deps import require_manager
 from ..models import Shop, ShopStaff
 from ..schemas import ShopCreate, ShopOut, ShopUpdate, StaffOut
 
@@ -31,7 +32,12 @@ def get_shop(shop_id: int, db: Session = Depends(get_db)):
 
 
 @router.put("/{shop_id}", response_model=ShopOut)
-def update_shop(shop_id: int, payload: ShopUpdate, db: Session = Depends(get_db)):
+def update_shop(
+    shop_id: int,
+    payload: ShopUpdate,
+    db: Session = Depends(get_db),
+    _: ShopStaff = Depends(require_manager),
+):
     shop = db.get(Shop, shop_id)
     if not shop:
         raise HTTPException(status_code=404, detail="Shop not found")
@@ -43,7 +49,11 @@ def update_shop(shop_id: int, payload: ShopUpdate, db: Session = Depends(get_db)
 
 
 @router.delete("/{shop_id}", status_code=204)
-def delete_shop(shop_id: int, db: Session = Depends(get_db)):
+def delete_shop(
+    shop_id: int,
+    db: Session = Depends(get_db),
+    _: ShopStaff = Depends(require_manager),
+):
     shop = db.get(Shop, shop_id)
     if not shop:
         raise HTTPException(status_code=404, detail="Shop not found")

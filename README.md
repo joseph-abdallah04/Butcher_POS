@@ -14,7 +14,8 @@ Use **Part A** for setup and deployment. Use **Part B** when writing **41091 Dat
 4. [ETL pipeline (Cloud Run) — behaviour](#etl-pipeline-cloud-run--behaviour)
 5. [Data warehouse (BigQuery) schema summary](#data-warehouse-bigquery-schema-summary)
 6. [Application backend & frontend map](#application-backend--frontend-map)
-7. [Marking sheet alignment (quick reference)](#marking-sheet-alignment-quick-reference)
+7. [Reporting metrics & ETL-to-dashboard mapping](#reporting-metrics--etl-to-dashboard-mapping)
+8. [Marking sheet alignment (quick reference)](#marking-sheet-alignment-quick-reference)
 
 ---
 
@@ -374,11 +375,180 @@ Dataset: **`Our_data_warehouse`** (adjust if renamed).
 | `/etl/sync` | Proxy trigger to ETL Cloud Run |
 | `/reports/*` | KPIs, trends, velocity, products, categories, wastage, staff, promo ROI |
 
+### Roles, Admin CRUD, and operational writes
+
+The lock screen records **which staff member** is on shift (`shop_staff.id` + **`role`** text, e.g. `Manager`, `Butcher`, `Cashier`). The SPA only shows **Admin** nav links when **`role`** is **`Manager`** (case-insensitive). The API still enforces the same rule on sensitive routes using the **`X-Acting-Staff-Id`** header (set from that session for every request).
+
+| Area | **Manager** | **Other roles** (Butcher, Cashier, …) |
+| --- | --- | --- |
+| **Admin tabs** (Inventory restock, Products, Categories, Suppliers, Customers, Promotions, Staff, Shops) | Visible in the UI; **create / update / delete** allowed where the API checks `require_manager`. | **Hidden** in the UI; direct API calls to those write endpoints return **403** (or **401** if the header is missing). |
+| **`GET /suppliers`** | Allowed (used when editing products). | **Not** allowed — suppliers list is manager-only so supplier master data is not exposed to non-managers. |
+| **Reads for POS / Wastage** (`GET /products`, `GET /categories`, `GET /customers`, `GET /promotions`, `GET /inventory`, `GET /wastage`, …) | Allowed. | Allowed — needed to run the till and log wastage. |
+| **`POST /shops`** (create shop from lock screen) | Allowed. | Allowed — so the **first** shop can be created before any manager exists in the database. |
+| **`PUT` / `DELETE` on `/shops/{id}`** | Allowed. | **403** — only managers may rename/remove shops. |
+| **`/staff` CRUD** (global staff admin, not “staff for this shop” on the lock screen) | Allowed. | **403** — lock-screen staff list uses **`GET /shops/{shop_id}/staff`**, which is **not** under this restriction. |
+| **Reports + ETL trigger** | Allowed (same as other roles today). | Same — not gated by manager in the backend; any logged-in staff can open **Reports** and refresh analytics. |
+
+**Non-managers cannot use Admin tabs** — but they still change live data through **operational** screens (this is intentional “CRUD through the app”, not through master-data forms):
+
+| Action | Where in the app | What gets written |
+| --- | --- | --- |
+| **Record a sale** | **POS** | Inserts **`sales`** + **`sale_items`**; decrements **`inventory`** for each line; may attach **`customer_id`**, **`promo_id`**, payment method, totals. |
+| **Log wastage** | **Wastage** | Inserts **`wastage`** (shop, product, quantity, reason, staff); decrements **`inventory`** when quantity is on hand. |
+
+Those flows use **`POST /sales`** and **`POST /wastage`** (with validation such as stock checks). They do **not** require the Manager role. After the next **ETL** run, sales and wastage feed the warehouse facts used on **Reports**.
+
+**Implementation pointers:** UI gating — `frontend/src/components/Layout.jsx`, `frontend/src/App.jsx`. Header + manager dependency — `frontend/src/api.js`, `backend/deps.py`, and the individual routers under `backend/routers/` (see `require_manager` on mutating handlers).
+
 ### Reports endpoints (for citing in report)
 
 Reports module queries BigQuery with optional **`shop_id`** — omit for franchise-wide aggregates.
 
 Typical endpoints: `kpis`, `revenue-trend`, `sales-velocity`, `top-products`, `category-mix`, `wastage-summary`, `staff-performance`, `promo-roi` (exact paths under `/api/reports/` in `backend/routers/reports.py`).
+
+---
+
+## Reporting metrics & ETL-to-dashboard mapping
+
+This section ties together **(1)** column-level transforms in **`ETL Pipeline/etl_pipeline.py`**, **(2)** SQL aggregations in **`backend/routers/reports.py`**, and **(3)** what appears on **`frontend/src/pages/Reports.jsx`**. If your deployed ETL bundle diverges from the repo file, treat that bundle as the source of truth for production numbers and reconcile this table with your live script.
+
+### End-to-end flow
+
+1. **OLTP** (Postgres) — source rows: `sale_items` + `sales`, `wastage`, promo sale lines, and dimension masters.  
+2. **ETL** — builds/loads BigQuery tables (`dim_*`, `fact_*`) and **computes fact columns** (revenue, COGS, tax, etc.).  
+3. **`/api/reports/*`** — parameterized BigQuery SQL **aggregates** (`SUM`, `COUNT`, `SAFE_DIVIDE`, `GROUP BY`) over those facts for the selected date range and optional `shop_id`.  
+4. **Reports page** — charts/tables bind to the JSON fields returned by those endpoints (plus two **client-side** rollups for velocity bars).
+
+---
+
+### ETL transforms (`ETL Pipeline/etl_pipeline.py`)
+
+#### Dimensions (used when reports `JOIN` dimensions)
+
+| Target table | Extract | Transform (in Python) | Used on Reports for |
+| --- | --- | --- | --- |
+| **`dim_products`** | `products` ⋈ `product_categories` ⋈ `suppliers` | `unit_measure` → `fillna('')` + string; `product_name` → **title case**; `category` → **UPPER**; retail/cost prices → `float` | **Top products** & **wastage-by-product** (`product_name`, `category`, **`unit_measure`**); **category mix** (`category`); joins for staff/promo tables are separate dims. |
+| **`dim_promotions`** | `promotions` | `discount_percent` → `float` | **Promotional ROI** (`promo_name`, `discount_percent`). |
+| **`dim_shops`**, **`dim_staff`** (Postgres **`shop_staff`**), **`dim_customers`** | `SELECT *` | Loaded as-is (typed by driver) | **Staff performance** (`staff_name`, `role` from `dim_staff`); promo/customer labels indirect via facts. |
+
+#### Fact 1 — `fact_sales_performance` (sale line grain)
+
+**Extract** (SQL in ETL): `sale_items` ⋈ `sales` ⋈ `LEFT JOIN products` — line `quantity`, `price_at_sale`, `discount_applied`, `COALESCE(products.cost_price, 0)` as `cost_price`, header `created_at` as `sale_timestamp`, plus ids (`sale_id`, `shop_id`, `staff_id`, `product_id`).
+
+**Transform** (pandas, same file):
+
+| Column | Formula / rule |
+| --- | --- |
+| `gross_revenue` | `quantity * price_at_sale` |
+| `net_revenue` | `gross_revenue - discount_applied` |
+| `total_cogs` | `quantity * cost_price` |
+| `net_profit` | `net_revenue - total_cogs` |
+| `tax_amount` | `net_revenue * 0.1`, rounded to **2** decimal places (fixed **10%** model on net revenue) |
+| `hour_of_day` | `sale_timestamp.dt.hour` |
+| `day_name` | `sale_timestamp.dt.day_name()` (e.g. `Monday`) |
+
+**Load:** rows appended after `TRUNCATE` of the fact table (full-refresh pattern in this script).
+
+#### Fact 2 — `fact_wastage_loss` (one row per wastage event)
+
+**Extract:** `wastage` ⋈ `LEFT JOIN products` — `quantity_wasted`, `reason`, `COALESCE(cost_price, 0)`, `created_at` → `event_timestamp`, ids.
+
+**Transform:**
+
+| Column | Formula / rule |
+| --- | --- |
+| `total_loss_value` | `quantity_wasted * cost_price` |
+| `reason` | **UPPER**-cased string |
+
+#### Fact 3 — `fact_marketing_impact` (sale lines where `promo_id` is set)
+
+**Extract:** `sales` ⋈ `sale_items` with `WHERE s.promo_id IS NOT NULL`; exposes `quantity`, `discount_applied` as `discount_value_given`, `(quantity * price_at_sale)` as `gross_revenue_pre_discount`, `sale_timestamp`.
+
+**Transform:** numeric casts to `float` for `quantity`, `discount_value_given`, `gross_revenue_pre_discount`.
+
+---
+
+### BigQuery aggregations (`backend/routers/reports.py`)
+
+Unless noted, filters are **`DATE(sale_timestamp)`** or **`DATE(event_timestamp)`** between `start_date` and `end_date`, plus optional **`shop_id`**.
+
+#### `GET /reports/kpis` → KPI cards
+
+| JSON field | BigQuery definition | ETL column(s) feeding it |
+| --- | --- | --- |
+| `gross_revenue` | `SUM(gross_revenue)` | `fact_sales_performance.gross_revenue` |
+| `net_revenue` | `SUM(net_revenue)` | `net_revenue` |
+| `net_profit` | `SUM(net_profit)` | `net_profit` |
+| `total_cogs` | `SUM(total_cogs)` | `total_cogs` |
+| `total_tax` | `SUM(tax_amount)` | **`tax_amount`** |
+| `transactions` | `COUNT(DISTINCT sale_id)` | distinct headers represented at line grain |
+| `avg_basket` | `SAFE_DIVIDE(SUM(net_revenue), COUNT(DISTINCT sale_id))` | derived from same sums |
+| `total_loss_value` | `SUM(total_loss_value)` on wastage fact | **`fact_wastage_loss.total_loss_value`** |
+| `wastage_events` | `COUNT(*)` wastage rows | row count in range |
+| `start_date`, `end_date` | Echo of query window | — |
+
+#### `GET /reports/revenue-trend` → “Net revenue, profit, and transactions over time”
+
+Per **`sale_date`** (`DATE(sale_timestamp)`): `SUM(gross_revenue)`, `SUM(net_revenue)`, `SUM(net_profit)`, `COUNT(DISTINCT sale_id)` as **`transactions`**. All from **`fact_sales_performance`**.
+
+#### `GET /reports/sales-velocity` → hourly / daily velocity charts (after UI rollup)
+
+Returns one row per **`(day_name, hour_of_day)`** from the fact: `SUM(net_revenue)`, `COUNT(DISTINCT sale_id)` as **`transactions`**. Uses ETL columns **`day_name`** and **`hour_of_day`**. The **bar charts** on the Reports page **re-sum** those rows in the browser by hour-only and by day-only (see below).
+
+#### `GET /reports/top-products`
+
+Per product: `SUM(quantity)` → **`units_sold`**, `SUM(net_revenue)`, `SUM(net_profit)`; joins **`dim_products`** for name, category, and **`unit_measure`** (SQL coalesces empty to **`—`**).
+
+#### `GET /reports/category-mix`
+
+Per category (from `dim_products`, default **`Uncategorised`**): `SUM(net_revenue)`, `SUM(net_profit)`, `SUM(quantity)` → **`units`**. Pie uses **`net_revenue`**.
+
+#### `GET /reports/wastage-summary`
+
+- **`by_reason`:** `reason`, `SUM(total_loss_value)`, `SUM(quantity_wasted)`, `COUNT(*)` as **`events`**. The main wastage bar chart plots **`total_loss_value`** only.  
+- **`by_product`:** product + category + **`unit_measure`** from `dim_products`, `SUM(total_loss_value)`, `SUM(quantity_wasted)`, `COUNT(*)` as **`events`**. Table shows qty with unit suffix.
+
+#### `GET /reports/staff-performance`
+
+Per staff: `COUNT(DISTINCT sale_id)` **`transactions`**, `SUM(net_revenue)`, `SUM(net_profit)`, `SAFE_DIVIDE(SUM(net_revenue), COUNT(DISTINCT sale_id))` **`avg_basket`**, plus **`staff_name`**, **`role`** from **`dim_staff`**.
+
+#### `GET /reports/promo-roi`
+
+Per promotion: **`redemptions`** = `COUNT(DISTINCT sale_id)`, **`units_sold`** = `SUM(quantity)`, **`gross_pre_discount`** = `SUM(gross_revenue_pre_discount)`, **`discount_given`** = `SUM(discount_value_given)`, **`net_revenue`** = `SUM(gross_revenue_pre_discount - discount_value_given)`, **`discount_share`** = `SAFE_DIVIDE(SUM(discount_value_given), SUM(gross_revenue_pre_discount))` (ratio; UI shows as percent). Dimension: **`dim_promotions`** for name and `discount_percent`.
+
+---
+
+### Reports UI (`frontend/src/pages/Reports.jsx`) — field binding
+
+| UI block | Data source | Primary fields |
+| --- | --- | --- |
+| **KPI grid** | `/reports/kpis` | `net_revenue`, `gross_revenue`, `net_profit`, `total_cogs`, `total_tax` (label **Tax paid**), `transactions`, `avg_basket`, `total_loss_value`, `wastage_events` |
+| **Line chart** (trend) | `/reports/revenue-trend` | `sale_date`, `net_revenue`, `net_profit`, `transactions` (tooltip uses count formatter for transactions) |
+| **Velocity by hour** | `/reports/sales-velocity` → **`aggregateByHour`** | Sums **`net_revenue`** (and keeps **`transactions`**) across all weekdays for each `hour_of_day` |
+| **Velocity by weekday** | same → **`aggregateByDay`** | Sums **`net_revenue`** / **`transactions`** per `day_name`, ordered Mon–Sun |
+| **Top products** chart + table | `/reports/top-products` | Chart: `product_name`, `net_revenue`, `net_profit`. Table adds `category`, **`unit_measure`**, `units_sold` |
+| **Category mix** donut | `/reports/category-mix` | `category`, `net_revenue` |
+| **Wastage by reason** bar | `wastage.by_reason` | `reason`, `total_loss_value` |
+| **Top wasted products** table | `wastage.by_product` | `product_name`, `category`, **`unit_measure`**, `quantity_wasted`, `events`, `total_loss_value` |
+| **Staff performance** table | `/reports/staff-performance` | `staff_name`, `role`, `transactions`, `net_revenue`, `net_profit`, `avg_basket` |
+| **Promotional ROI** table | `/reports/promo-roi` | `promo_name`, `discount_percent`, `redemptions`, `units_sold`, `gross_pre_discount`, `discount_given`, `net_revenue`, `discount_share` (label **Margin bleed**) |
+
+---
+
+### Quick reference: ETL line metric → first place it appears on Reports
+
+| ETL-derived fact column | Typical first use on Reports |
+| --- | --- |
+| `gross_revenue` | KPI **Gross revenue**; revenue trend line; not the main velocity bars (those emphasize **net**). |
+| `net_revenue` | KPI **Net revenue**; trend; velocity charts; category mix; top products; staff; promo **net_revenue**. |
+| `net_profit` | KPI **Net profit**; trend; top products; staff. |
+| `total_cogs` | KPI **COGS**. |
+| `tax_amount` | KPI **Tax paid** (`SUM` as `total_tax`). |
+| `hour_of_day`, `day_name` | Velocity dataset; then collapsed in UI aggregators. |
+| Wastage `total_loss_value` | KPI **Total loss (wastage)**; wastage charts/tables. |
+| Wastage `reason` | Grouping in **by_reason** (ETL uppercases; chart shows those values). |
+| Marketing `gross_revenue_pre_discount`, `discount_value_given` | Promo ROI **Gross pre-discount**, **Discount given**, **Margin bleed**, **Net revenue** for promo lines. |
+| `dim_products.unit_measure` | Top products table; wastage-by-product table/column. |
 
 ---
 

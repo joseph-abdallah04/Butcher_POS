@@ -2,7 +2,8 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from ..database import get_db
-from ..models import ProductCategory
+from ..deps import require_manager
+from ..models import ProductCategory, ShopStaff
 from ..schemas import CategoryCreate, CategoryOut, CategoryUpdate
 
 router = APIRouter(prefix="/categories", tags=["categories"])
@@ -14,7 +15,11 @@ def list_categories(db: Session = Depends(get_db)):
 
 
 @router.post("", response_model=CategoryOut, status_code=201)
-def create_category(payload: CategoryCreate, db: Session = Depends(get_db)):
+def create_category(
+    payload: CategoryCreate,
+    db: Session = Depends(get_db),
+    _: ShopStaff = Depends(require_manager),
+):
     category = ProductCategory(**payload.model_dump())
     db.add(category)
     db.commit()
@@ -23,7 +28,12 @@ def create_category(payload: CategoryCreate, db: Session = Depends(get_db)):
 
 
 @router.put("/{category_id}", response_model=CategoryOut)
-def update_category(category_id: int, payload: CategoryUpdate, db: Session = Depends(get_db)):
+def update_category(
+    category_id: int,
+    payload: CategoryUpdate,
+    db: Session = Depends(get_db),
+    _: ShopStaff = Depends(require_manager),
+):
     category = db.get(ProductCategory, category_id)
     if not category:
         raise HTTPException(status_code=404, detail="Category not found")
@@ -35,7 +45,11 @@ def update_category(category_id: int, payload: CategoryUpdate, db: Session = Dep
 
 
 @router.delete("/{category_id}", status_code=204)
-def delete_category(category_id: int, db: Session = Depends(get_db)):
+def delete_category(
+    category_id: int,
+    db: Session = Depends(get_db),
+    _: ShopStaff = Depends(require_manager),
+):
     category = db.get(ProductCategory, category_id)
     if not category:
         raise HTTPException(status_code=404, detail="Category not found")

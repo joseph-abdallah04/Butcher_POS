@@ -1,6 +1,20 @@
+import { SESSION_STORAGE_KEY } from './context/SessionContext.jsx';
 import { demoFetch, isDemo } from './demo.js';
 
 const BASE = '/api';
+
+function actingStaffHeaders() {
+  try {
+    const raw = localStorage.getItem(SESSION_STORAGE_KEY);
+    if (!raw) return {};
+    const s = JSON.parse(raw);
+    const id = s.staff?.id;
+    if (id == null) return {};
+    return { 'X-Acting-Staff-Id': String(id) };
+  } catch {
+    return {};
+  }
+}
 
 async function request(path, { method = 'GET', body, query } = {}) {
   if (isDemo) {
@@ -18,7 +32,7 @@ async function request(path, { method = 'GET', body, query } = {}) {
 
   const init = {
     method,
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...actingStaffHeaders() },
   };
   if (body !== undefined) {
     init.body = JSON.stringify(body);

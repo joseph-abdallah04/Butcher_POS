@@ -4,7 +4,9 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from ..database import get_db
+from ..deps import require_manager
 from ..inventory_stock import apply_stock_delta
+from ..models import ShopStaff
 from ..schemas import InventoryOut, InventoryRestock
 
 router = APIRouter(prefix="/inventory", tags=["inventory"])
@@ -32,7 +34,11 @@ def list_inventory(shop_id: int, db: Session = Depends(get_db)):
 
 
 @router.post("/restock", response_model=InventoryOut, status_code=200)
-def restock(payload: InventoryRestock, db: Session = Depends(get_db)):
+def restock(
+    payload: InventoryRestock,
+    db: Session = Depends(get_db),
+    _: ShopStaff = Depends(require_manager),
+):
     """Increase stock and set ``last_restock_date`` (receiving / stocktake adjustment)."""
     try:
         apply_stock_delta(

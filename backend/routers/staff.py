@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from ..database import get_db
+from ..deps import require_manager
 from ..models import ShopStaff
 from ..schemas import StaffCreate, StaffOut, StaffUpdate
 
@@ -9,7 +10,11 @@ router = APIRouter(prefix="/staff", tags=["staff"])
 
 
 @router.get("", response_model=list[StaffOut])
-def list_staff(shop_id: int | None = None, db: Session = Depends(get_db)):
+def list_staff(
+    shop_id: int | None = None,
+    db: Session = Depends(get_db),
+    _: ShopStaff = Depends(require_manager),
+):
     query = db.query(ShopStaff)
     if shop_id is not None:
         query = query.filter(ShopStaff.shop_id == shop_id)
@@ -17,7 +22,11 @@ def list_staff(shop_id: int | None = None, db: Session = Depends(get_db)):
 
 
 @router.post("", response_model=StaffOut, status_code=201)
-def create_staff(payload: StaffCreate, db: Session = Depends(get_db)):
+def create_staff(
+    payload: StaffCreate,
+    db: Session = Depends(get_db),
+    _: ShopStaff = Depends(require_manager),
+):
     staff = ShopStaff(**payload.model_dump())
     db.add(staff)
     db.commit()
@@ -26,7 +35,11 @@ def create_staff(payload: StaffCreate, db: Session = Depends(get_db)):
 
 
 @router.get("/{staff_id}", response_model=StaffOut)
-def get_staff(staff_id: int, db: Session = Depends(get_db)):
+def get_staff(
+    staff_id: int,
+    db: Session = Depends(get_db),
+    _: ShopStaff = Depends(require_manager),
+):
     staff = db.get(ShopStaff, staff_id)
     if not staff:
         raise HTTPException(status_code=404, detail="Staff not found")
@@ -34,7 +47,12 @@ def get_staff(staff_id: int, db: Session = Depends(get_db)):
 
 
 @router.put("/{staff_id}", response_model=StaffOut)
-def update_staff(staff_id: int, payload: StaffUpdate, db: Session = Depends(get_db)):
+def update_staff(
+    staff_id: int,
+    payload: StaffUpdate,
+    db: Session = Depends(get_db),
+    _: ShopStaff = Depends(require_manager),
+):
     staff = db.get(ShopStaff, staff_id)
     if not staff:
         raise HTTPException(status_code=404, detail="Staff not found")
@@ -46,7 +64,11 @@ def update_staff(staff_id: int, payload: StaffUpdate, db: Session = Depends(get_
 
 
 @router.delete("/{staff_id}", status_code=204)
-def delete_staff(staff_id: int, db: Session = Depends(get_db)):
+def delete_staff(
+    staff_id: int,
+    db: Session = Depends(get_db),
+    _: ShopStaff = Depends(require_manager),
+):
     staff = db.get(ShopStaff, staff_id)
     if not staff:
         raise HTTPException(status_code=404, detail="Staff not found")
