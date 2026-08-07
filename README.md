@@ -1,7 +1,5 @@
 # Butchery POS
 
-**LAUNCH THE APP WITH THIS LINK:** https://butchery-pos-484746792604.australia-southeast1.run.app/ 
-
 A franchise-aware point-of-sale and reporting system for a butchery chain, built for **41091 Data Systems — Assignment 2**.
 
 The app handles day-to-day operations (sales, wastage, inventory, master data) on top of a Cloud SQL PostgreSQL OLTP database, and powers analytics dashboards from a BigQuery warehouse populated by a separate Cloud Run ETL job.
